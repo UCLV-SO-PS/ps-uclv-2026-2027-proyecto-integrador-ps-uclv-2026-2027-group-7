@@ -1,0 +1,7 @@
+*.o
+*.a
+server
+client
+screenshot/*.png.tmp
+*.swp
+*~
