@@ -161,26 +161,124 @@ static int instalar_manejadores(void)
     return 0;
 }
 
-int main(void)
+static int servidor_test_run(int fd_srv)
 {
-    if (instalar_manejadores() != 0) {
-        fprintf(stderr, "Error instalando manejadores de senales\n");
+    printf("[TEST] Servidor en modo --test-run\n");
+
+    /* --- 1) Validar la base de datos --- */
+    if (monitor_total() != 6) {
+        fprintf(stderr, "[TEST] FALLO: la BD no tiene 6 episodios\n");
         return 1;
     }
-
-    if (monitor_init() != 0) {
-        fprintf(stderr, "Error inicializando la base de datos\n");
+    const Episodio *ep = monitor_buscar("S01E01");
+    if (ep == NULL || strcmp(ep->titulo, "The Hedge Knight") != 0) {
+        fprintf(stderr, "[TEST] FALLO: S01E01 no encontrado o incorrecto\n");
         return 1;
     }
+    printf("[TEST] BD OK: %d episodios, S01E01 = '%s'\n",
+           monitor_total(), ep->titulo);
 
-    int fd_srv = crear_socket_servidor();
-    if (fd_srv < 0)
-        return 1;
-
-    printf("[PID %d] Servidor escuchando en puerto %d...\n",
-           (int)getpid(), PUERTO);
+    /* --- 2) Lanzar cliente interno en un hijo --- */
     fflush(stdout);
 
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("[TEST] fork");
+        return 1;
+    }
+
+    if (pid == 0) {
+        /* ---------- HIJO: cliente interno ---------- */
+        /* Pequeña pausa para que el padre llegue al accept. */
+        usleep(100 * 1000);   /* 100 ms */
+
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            perror("[TEST hijo] socket");
+            _exit(1);
+        }
+
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof addr);
+        addr.sin_family = AF_INET;
+        addr.sin_port   = htons(PUERTO);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+        if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+            perror("[TEST hijo] connect");
+            close(fd);
+            _exit(1);
+        }
+
+        /* Enviar codigo. */
+        const char *codigo = "S01E01";
+        if (write(fd, codigo, TAM_CODIGO) != TAM_CODIGO) {
+            perror("[TEST hijo] write");
+            close(fd);
+            _exit(1);
+        }
+
+        /* Leer respuesta hasta '\0'. */
+        char resp[TAM_RESP];
+        size_t total = 0;
+        for (;;) {
+            if (total >= sizeof resp - 1)
+                break;
+            ssize_t n = read(fd, resp + total, sizeof resp - 1 - total);
+            if (n <= 0)
+                break;
+            total += (size_t)n;
+            if (memchr(resp, '\0', total) != NULL)
+                break;
+        }
+        resp[total] = '\0';
+        close(fd);
+
+        /* Validar respuesta. */
+        if (strstr(resp, "The Hedge Knight") == NULL) {
+            fprintf(stderr, "[TEST hijo] FALLO: respuesta inesperada:\n%s\n", resp);
+            _exit(1);
+        }
+
+        printf("[TEST hijo] OK: respuesta correcta:\n%s", resp);
+        _exit(0);
+    }
+
+    /* ---------- PADRE: servidor, un solo accept ---------- */
+    struct sockaddr_in cli_addr;
+    socklen_t cli_len = sizeof cli_addr;
+
+    int fd_cli = accept(fd_srv, (struct sockaddr *)&cli_addr, &cli_len);
+    if (fd_cli < 0) {
+        perror("[TEST] accept");
+        /* Matar al hijo para no dejarlo colgado. */
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
+
+    /* Atender al cliente interno igual que en produccion. */
+    atender_cliente(fd_cli, &cli_addr);
+    close(fd_cli);
+
+    /* Esperar al hijo y comprobar su codigo de salida. */
+    int estado = 0;
+    if (waitpid(pid, &estado, 0) < 0) {
+        perror("[TEST] waitpid");
+        return 1;
+    }
+
+    if (!WIFEXITED(estado) || WEXITSTATUS(estado) != 0) {
+        fprintf(stderr, "[TEST] FALLO: el cliente interno fallo\n");
+        return 1;
+    }
+
+    printf("[TEST] OK: servidor responde correctamente\n");
+    return 0;
+}
+
+static void servidor_normal(int fd_srv)
+{
     for (;;) {
         struct sockaddr_in cli_addr;
         socklen_t cli_len = sizeof cli_addr;
@@ -195,10 +293,6 @@ int main(void)
 
         fflush(stdout);
 
-        /*
-         * Tubería por conexión. Se crea ANTES del fork para que el hijo
-         * la herede. fd_pipe[0] = lectura (padre), fd_pipe[1] = escritura (hijo).
-         */
         int fd_pipe[2];
         if (pipe(fd_pipe) < 0) {
             perror("pipe");
@@ -216,23 +310,23 @@ int main(void)
         }
 
         if (pid == 0) {
-            /* ---------- HIJO ---------- */
-            close(fd_srv);
-            close(fd_pipe[0]);              /* el hijo solo escribe */
+            /* HIJO */
+            struct sigaction sa;
+            memset(&sa, 0, sizeof sa);
+            sa.sa_handler = SIG_DFL;
+            sigemptyset(&sa.sa_mask);
+            sigaction(SIGCHLD, &sa, NULL);
 
-            /*
-             * Construir y enviar "PID IP\n" en un solo write.
-             * Al ser < PIPE_BUF, es atomico segun POSIX.
-             */
+            close(fd_srv);
+            close(fd_pipe[0]);
+
             char ip[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &cli_addr.sin_addr, ip, sizeof ip);
-
             char msg[64];
-            int n = snprintf(msg, sizeof msg, "%d %s\n",
-                             (int)getpid(), ip);
+            int n = snprintf(msg, sizeof msg, "%d %s\n", (int)getpid(), ip);
             if (n > 0 && (size_t)n < sizeof msg) {
                 ssize_t w = write(fd_pipe[1], msg, (size_t)n);
-                (void)w;   /* si falla, el padre no recibira nada, no es critico */
+                (void)w;
             }
             close(fd_pipe[1]);
 
@@ -241,15 +335,10 @@ int main(void)
             _exit(0);
         }
 
-        /* ---------- PADRE ---------- */
+        /* PADRE */
         close(fd_cli);
-        close(fd_pipe[1]);                  /* el padre solo lee */
+        close(fd_pipe[1]);
 
-        /*
-         * Leer la linea "PID IP\n" que envia el hijo.
-         * El hijo la escribe justo tras el fork, asi que esta lectura
-         * no se bloquea salvo microsegundos.
-         */
         FILE *f = fdopen(fd_pipe[0], "r");
         if (f == NULL) {
             perror("fdopen");
@@ -263,22 +352,56 @@ int main(void)
                     printf("[PID %d] Hijo %d atiende a cliente %s\n",
                            (int)getpid(), pid_hijo, ip);
                     fflush(stdout);
-                } else {
-                    fprintf(stderr, "[PID %d] Mensaje malformado del hijo: %s",
-                            (int)getpid(), linea);
                 }
-            } else {
-                /* El hijo cerro la tuberia sin escribir nada. */
-                fprintf(stderr, "[PID %d] Sin datos del hijo %d\n",
-                        (int)getpid(), (int)pid);
             }
-            fclose(f);   /* cierra fd_pipe[0] tambien */
+            fclose(f);
         }
 
         printf("[PID %d] Hijo creado: PID %d\n", (int)getpid(), (int)pid);
         fflush(stdout);
     }
+}
+
+int main(int argc, char *argv[])
+{
+    int modo_test = 0;
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "--test-run") == 0) {
+            modo_test = 1;
+        } else {
+            fprintf(stderr, "Uso: %s [--test-run]\n", argv[0]);
+            return 1;
+        }
+    }
+
+    if (instalar_manejadores() != 0) {
+        fprintf(stderr, "Error instalando manejadores de senales\n");
+        return 1;
+    }
+
+    if (monitor_init() != 0) {
+        fprintf(stderr, "Error inicializando la base de datos\n");
+        return 1;
+    }
+
+    int fd_srv = crear_socket_servidor();
+    if (fd_srv < 0)
+        return 1;
+
+    printf("[PID %d] Servidor escuchando en puerto %d%s\n",
+           (int)getpid(), PUERTO,
+           modo_test ? " (modo test)" : "");
+    fflush(stdout);
+
+    int rc;
+    if (modo_test) {
+        rc = servidor_test_run(fd_srv);
+    } else {
+        servidor_normal(fd_srv);
+        rc = 0;   /* inalcanzable */
+    }
 
     close(fd_srv);
-    return 0;
+    return rc;
 }
