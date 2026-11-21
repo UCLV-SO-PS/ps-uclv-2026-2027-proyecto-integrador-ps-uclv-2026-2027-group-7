@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 #include "monitor.h"
 
@@ -111,8 +112,62 @@ static void atender_cliente(int fd_cli, struct sockaddr_in *cli_addr)
     fflush(stdout);
 }
 
+static void manejador_sigchld(int sig)
+{
+    (void)sig;   /* no lo usamos, pero la firma lo exige */
+
+    /*
+     * Cosechar TODOS los hijos terminados.
+     * El bucle es obligatorio: SIGCHLD no se encola, una sola
+     * senal puede representar varias terminaciones.
+     *
+     * waitpid con WNOHANG devuelve:
+     *   > 0  -> PID del hijo cosechado, seguir en el bucle
+     *     0  -> hay hijos pero ninguno terminado, salir
+     *    -1  -> error (normalmente ECHILD = no quedan hijos), salir
+     */
+    int estado;
+    while (waitpid(-1, &estado, WNOHANG) > 0)
+        ;
+}
+
+
+static int instalar_manejadores(void)
+{
+    struct sigaction sa;
+
+    /* ---------- SIGINT: ignorar ---------- */
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, NULL) < 0) {
+        perror("sigaction SIGINT");
+        return -1;
+    }
+
+    /* ---------- SIGCHLD: cosechar hijos ---------- */
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = manejador_sigchld;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+
+    if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+        perror("sigaction SIGCHLD");
+        return -1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
+    if (instalar_manejadores() != 0) {
+        fprintf(stderr, "Error instalando manejadores de senales\n");
+        return 1;
+    }
+
     if (monitor_init() != 0) {
         fprintf(stderr, "Error inicializando la base de datos\n");
         return 1;
