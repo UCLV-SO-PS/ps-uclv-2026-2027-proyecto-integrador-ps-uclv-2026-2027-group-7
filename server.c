@@ -112,6 +112,29 @@ static void atender_cliente(int fd_cli, struct sockaddr_in *cli_addr)
     fflush(stdout);
 }
 
+/*
+ * Mantiene vivo al proceso hijo después de enviar la respuesta.
+ * El cliente conserva la conexión abierta mientras espera que el usuario
+ * presione 'q'. Cuando el cliente cierra el socket, read() devuelve 0.
+ */
+static void esperar_cierre_cliente(int fd_cli)
+{
+    char descarte[128];
+
+    for (;;) {
+        ssize_t n = read(fd_cli, descarte, sizeof descarte);
+        if (n == 0)
+            break;                  /* El cliente cerró la conexión. */
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            perror("read esperando cierre del cliente");
+            break;
+        }
+        /* No se esperan más datos: se descartan si llegan. */
+    }
+}
+
 static void manejador_sigchld(int sig)
 {
     (void)sig;   /* no lo usamos, pero la firma lo exige */
@@ -132,7 +155,7 @@ static void manejador_sigchld(int sig)
 }
 
 
-static int instalar_manejadores(void)
+static int instalar_manejadores(int instalar_sigchld)
 {
     struct sigaction sa;
 
@@ -147,15 +170,17 @@ static int instalar_manejadores(void)
         return -1;
     }
 
-    /* ---------- SIGCHLD: cosechar hijos ---------- */
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = manejador_sigchld;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    /* ---------- SIGCHLD: cosechar hijos en el servidor normal ---------- */
+    if (instalar_sigchld) {
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = manejador_sigchld;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
 
-    if (sigaction(SIGCHLD, &sa, NULL) < 0) {
-        perror("sigaction SIGCHLD");
-        return -1;
+        if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+            perror("sigaction SIGCHLD");
+            return -1;
+        }
     }
 
     return 0;
@@ -331,6 +356,10 @@ static void servidor_normal(int fd_srv)
             close(fd_pipe[1]);
 
             atender_cliente(fd_cli, &cli_addr);
+
+            /* El hijo sigue activo hasta que el cliente presione q y cierre. */
+            esperar_cierre_cliente(fd_cli);
+
             close(fd_cli);
             _exit(0);
         }
@@ -375,7 +404,8 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (instalar_manejadores() != 0) {
+    /* En --test-run, waitpid() debe poder recoger directamente al hijo de prueba. */
+    if (instalar_manejadores(!modo_test) != 0) {
         fprintf(stderr, "Error instalando manejadores de senales\n");
         return 1;
     }

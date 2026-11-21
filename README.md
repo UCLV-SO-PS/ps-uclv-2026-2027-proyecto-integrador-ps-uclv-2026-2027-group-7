@@ -18,7 +18,27 @@ Servidor concurrente TCP en C que consulta una base de datos de episodios
 de "A Knight of the Seven Kingdoms" y responde a clientes que envían
 códigos como `S01E05`. Escucha en el puerto **6666**.
 
+El servidor atiende cada conexión en un proceso hijo creado con `fork()`.
+El hijo envía la dirección IP del cliente al padre a través de una tubería
+anónima (`pipe()`) antes de atender la solicitud. El padre cosecha a los
+hijos terminados con `SIGCHLD` + `sigaction()` + `waitpid(-1, NULL, WNOHANG)`
+para evitar procesos zombis.
+
+## Estructura del repositorio
+
+.
+├── Makefile
+├── README.md
+├── monitor.c / monitor.h # Base de datos y utilidades (libmonitor.a)
+├── server.c # Servidor concurrente TCP
+├── client.c # Cliente de consola
+├── libmonitor.a # Generada por make all
+├── server / client # Generados por make all
+└── screenshot/ # Capturas de funcionamiento
+text
+
+
 ## Compilación
 
+```bash
 make all
-

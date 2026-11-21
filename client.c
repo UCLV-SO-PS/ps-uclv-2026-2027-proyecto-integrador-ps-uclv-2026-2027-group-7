@@ -73,12 +73,23 @@ int main(void)
     if (fd < 0)
         return 1;
 
-    /* Enviar los 6 bytes exactos. */
-    ssize_t enviado = write(fd, codigo, TAM_CODIGO);
-    if (enviado < 0) {
-        perror("write");
-        close(fd);
-        return 1;
+    /* Enviar los 6 bytes exactos, incluso si write() escribe parcialmente. */
+    size_t enviados = 0;
+    while (enviados < TAM_CODIGO) {
+        ssize_t n = write(fd, codigo + enviados, TAM_CODIGO - enviados);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            perror("write");
+            close(fd);
+            return 1;
+        }
+        if (n == 0) {
+            fprintf(stderr, "No se pudo completar el envio del codigo.\n");
+            close(fd);
+            return 1;
+        }
+        enviados += (size_t)n;
     }
 
     /* Leer hasta '\0'. */
