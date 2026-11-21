@@ -106,6 +106,19 @@ int main(void)
 
     printf("%s", resp);
 
+    /* ---Esperar a que el usuario presione 'q' --- */
+    printf("\n[Presione 'q' y Enter para cerrar la conexion y terminar]: ");
+    fflush(stdout);
+    
+    char salir[10];
+    while (fgets(salir, sizeof salir, stdin) != NULL) {
+        if (salir[0] == 'q' || salir[0] == 'Q') {
+            break;
+        }
+        printf("[Presione 'q' y Enter para cerrar]: ");
+        fflush(stdout);
+    }
+
     close(fd);
     return 0;
 }
