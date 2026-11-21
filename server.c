@@ -6,6 +6,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include "monitor.h"
 
@@ -22,7 +24,6 @@ static int crear_socket_servidor(void)
         return -1;
     }
 
-    /* Permite reutilizar el puerto tras un cierre rápido. */
     int opt = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt) < 0) {
         perror("setsockopt");
@@ -41,7 +42,6 @@ static int crear_socket_servidor(void)
         close(fd);
         return -1;
     }
-
     if (listen(fd, BACKLOG) < 0) {
         perror("listen");
         close(fd);
@@ -56,10 +56,10 @@ static void atender_cliente(int fd_cli, struct sockaddr_in *cli_addr)
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &cli_addr->sin_addr, ip, sizeof ip);
 
-    printf("Cliente conectado desde %s:%d\n",
-           ip, ntohs(cli_addr->sin_port));
+    printf("[PID %d] Cliente conectado desde %s:%d\n",
+           (int)getpid(), ip, ntohs(cli_addr->sin_port));
+    fflush(stdout);
 
-    /* 1) Leer exactamente 6 bytes. */
     char codigo[TAM_CODIGO + 1];
     memset(codigo, 0, sizeof codigo);
 
@@ -67,40 +67,48 @@ static void atender_cliente(int fd_cli, struct sockaddr_in *cli_addr)
     while (total < TAM_CODIGO) {
         ssize_t n = read(fd_cli, codigo + total, TAM_CODIGO - total);
         if (n < 0) {
+            if (errno == EINTR)
+                continue;
             perror("read");
             return;
         }
         if (n == 0) {
-            printf("Cliente cerro antes de enviar el codigo.\n");
+            printf("[PID %d] Cliente cerro antes de enviar el codigo.\n",
+                   (int)getpid());
+            fflush(stdout);
             return;
         }
         total += n;
     }
 
-    printf("Solicitud recibida: %s\n", codigo);
+    printf("[PID %d] Solicitud recibida: %s\n", (int)getpid(), codigo);
+    fflush(stdout);
 
-    /* 2) Buscar y formatear. */
     char resp[TAM_RESP];
     const Episodio *ep = monitor_buscar(codigo);
     int n;
     if (ep == NULL) {
-        n = snprintf(resp, sizeof resp, "ERROR: codigo '%s' no encontrado\n", codigo);
+        n = snprintf(resp, sizeof resp,
+                     "ERROR: codigo '%s' no encontrado\n", codigo);
     } else {
         n = monitor_formatear(ep, resp, sizeof resp);
     }
-
     if (n < 0) {
-        fprintf(stderr, "Error formateando respuesta\n");
+        fprintf(stderr, "[PID %d] Error formateando respuesta\n",
+                (int)getpid());
         return;
     }
 
-    /* 3) Enviar respuesta. Se envía n+1 para incluir el '\0'. */
     ssize_t enviado = write(fd_cli, resp, (size_t)n + 1);
     if (enviado < 0) {
-        perror("write");
+        if (errno != EINTR)
+            perror("write");
         return;
     }
-    printf("Respuesta enviada (%zd bytes).\n", enviado);
+
+    printf("[PID %d] Respuesta enviada (%zd bytes).\n",
+           (int)getpid(), enviado);
+    fflush(stdout);
 }
 
 int main(void)
@@ -114,7 +122,8 @@ int main(void)
     if (fd_srv < 0)
         return 1;
 
-    printf("Servidor escuchando en puerto %d...\n", PUERTO);
+    printf("[PID %d] Servidor escuchando en puerto %d...\n",
+           (int)getpid(), PUERTO);
     fflush(stdout);
 
     for (;;) {
@@ -123,12 +132,38 @@ int main(void)
 
         int fd_cli = accept(fd_srv, (struct sockaddr *)&cli_addr, &cli_len);
         if (fd_cli < 0) {
+            if (errno == EINTR)
+                continue;          /* interrumpido por señal, reintentar */
             perror("accept");
             continue;
         }
 
-        atender_cliente(fd_cli, &cli_addr);
-        close(fd_cli);
+        /*
+         * MUY importante: vaciar stdout antes del fork.
+         * Si no, el hijo hereda el buffer y puede duplicar mensajes.
+         */
+        fflush(stdout);
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            close(fd_cli);
+            continue;
+        }
+
+        if (pid == 0) {
+            /* ---------- HIJO ---------- */
+            close(fd_srv);                  /* no lo necesita */
+            atender_cliente(fd_cli, &cli_addr);
+            close(fd_cli);
+            _exit(0);                       /* _exit, no exit */
+        }
+
+        /* ---------- PADRE ---------- */
+        close(fd_cli);                      /* ya lo atiende el hijo */
+        printf("[PID %d] Hijo creado: PID %d\n", (int)getpid(), (int)pid);
+        fflush(stdout);
+        /* (En Fase 5 se añadirá aquí la cosecha con SIGCHLD.) */
     }
 
     close(fd_srv);
