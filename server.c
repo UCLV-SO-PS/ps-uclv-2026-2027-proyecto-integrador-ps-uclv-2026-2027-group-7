@@ -133,37 +133,95 @@ int main(void)
         int fd_cli = accept(fd_srv, (struct sockaddr *)&cli_addr, &cli_len);
         if (fd_cli < 0) {
             if (errno == EINTR)
-                continue;          /* interrumpido por señal, reintentar */
+                continue;
             perror("accept");
             continue;
         }
 
-        /*
-         * MUY importante: vaciar stdout antes del fork.
-         * Si no, el hijo hereda el buffer y puede duplicar mensajes.
-         */
         fflush(stdout);
+
+        /*
+         * Tubería por conexión. Se crea ANTES del fork para que el hijo
+         * la herede. fd_pipe[0] = lectura (padre), fd_pipe[1] = escritura (hijo).
+         */
+        int fd_pipe[2];
+        if (pipe(fd_pipe) < 0) {
+            perror("pipe");
+            close(fd_cli);
+            continue;
+        }
 
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
+            close(fd_pipe[0]);
+            close(fd_pipe[1]);
             close(fd_cli);
             continue;
         }
 
         if (pid == 0) {
             /* ---------- HIJO ---------- */
-            close(fd_srv);                  /* no lo necesita */
+            close(fd_srv);
+            close(fd_pipe[0]);              /* el hijo solo escribe */
+
+            /*
+             * Construir y enviar "PID IP\n" en un solo write.
+             * Al ser < PIPE_BUF, es atomico segun POSIX.
+             */
+            char ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &cli_addr.sin_addr, ip, sizeof ip);
+
+            char msg[64];
+            int n = snprintf(msg, sizeof msg, "%d %s\n",
+                             (int)getpid(), ip);
+            if (n > 0 && (size_t)n < sizeof msg) {
+                ssize_t w = write(fd_pipe[1], msg, (size_t)n);
+                (void)w;   /* si falla, el padre no recibira nada, no es critico */
+            }
+            close(fd_pipe[1]);
+
             atender_cliente(fd_cli, &cli_addr);
             close(fd_cli);
-            _exit(0);                       /* _exit, no exit */
+            _exit(0);
         }
 
         /* ---------- PADRE ---------- */
-        close(fd_cli);                      /* ya lo atiende el hijo */
+        close(fd_cli);
+        close(fd_pipe[1]);                  /* el padre solo lee */
+
+        /*
+         * Leer la linea "PID IP\n" que envia el hijo.
+         * El hijo la escribe justo tras el fork, asi que esta lectura
+         * no se bloquea salvo microsegundos.
+         */
+        FILE *f = fdopen(fd_pipe[0], "r");
+        if (f == NULL) {
+            perror("fdopen");
+            close(fd_pipe[0]);
+        } else {
+            char linea[128];
+            if (fgets(linea, sizeof linea, f) != NULL) {
+                int pid_hijo;
+                char ip[INET_ADDRSTRLEN];
+                if (sscanf(linea, "%d %45s", &pid_hijo, ip) == 2) {
+                    printf("[PID %d] Hijo %d atiende a cliente %s\n",
+                           (int)getpid(), pid_hijo, ip);
+                    fflush(stdout);
+                } else {
+                    fprintf(stderr, "[PID %d] Mensaje malformado del hijo: %s",
+                            (int)getpid(), linea);
+                }
+            } else {
+                /* El hijo cerro la tuberia sin escribir nada. */
+                fprintf(stderr, "[PID %d] Sin datos del hijo %d\n",
+                        (int)getpid(), (int)pid);
+            }
+            fclose(f);   /* cierra fd_pipe[0] tambien */
+        }
+
         printf("[PID %d] Hijo creado: PID %d\n", (int)getpid(), (int)pid);
         fflush(stdout);
-        /* (En Fase 5 se añadirá aquí la cosecha con SIGCHLD.) */
     }
 
     close(fd_srv);
