@@ -3,7 +3,7 @@
 # ============================================================
 
 CC      = gcc
-CFLAGS  = -Wall -Wextra -g
+CFLAGS  = -Wall -Wextra -g -I.
 AR      = ar
 ARFLAGS = rcs
 
@@ -21,7 +21,7 @@ $(LIB): $(OBJS)
 monitor.o: monitor.c monitor.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-server: server.c $(LIB)
+server: server.c monitor.h $(LIB)
 	$(CC) $(CFLAGS) server.c -L. -lmonitor -o $@
 
 client: client.c

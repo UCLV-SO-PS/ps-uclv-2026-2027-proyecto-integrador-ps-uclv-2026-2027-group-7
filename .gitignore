@@ -2,6 +2,7 @@
 *.a
 server
 client
-screenshot/*.png.tmp
+test_monitor
+test_monitor.c
 *.swp
 *~
