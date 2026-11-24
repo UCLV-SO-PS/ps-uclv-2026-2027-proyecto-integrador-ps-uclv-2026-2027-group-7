@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ps-uclv-2026-2027-laboratorio-1-git-github-ronaldo-castillo-basso
 
 # Proyecto Final — Servidor Concurrente TCP de Calificaciones IMDb
@@ -42,3 +43,6 @@ text
 
 ```bash
 make all
+=======
+# ps-uclv-2026-2027-proyecto-integrador-ps-uclv-2026-2027-group-7
+>>>>>>> a41e97c7bd3d7a3f198cf88502feac32ea24d653
