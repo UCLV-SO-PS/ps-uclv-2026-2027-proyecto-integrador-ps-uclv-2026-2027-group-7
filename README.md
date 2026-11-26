@@ -7,11 +7,15 @@
 **Curso:** 2026–2027
 **Equipo:** <Ronaldo_Castillo_Basso>
 
+
 ## Integrantes
 
 | Nombre completo 		| 	Usuario GitHub	     |
 |-------------------------------|----------------------------|
 | Ronaldo Castillo Basso        | rcastillobasso111@gmail.com|
+
+
+### Nota: 5
 
 ## Descripción
 
